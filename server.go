@@ -3,28 +3,61 @@ package main
 import (
 	"bytes"
 	"io"
-	"log"
 	"net"
+	"os"
 	"regexp"
+
+	logging "github.com/op/go-logging"
+	"github.com/urfave/cli"
+)
+
+var log = logging.MustGetLogger("txproxy")
+var format = logging.MustStringFormatter(
+	`%{color}%{time:15:04:05.000} %{level} %{shortfunc} %{shortfile}:%{color:reset} %{message}`,
 )
 
 func main() {
-	l, err := net.Listen("tcp", ":8080")
-	if err != nil {
-		log.Panic(err)
+	// logger config
+	backend1 := logging.NewLogBackend(os.Stdout, "", 0)
+	backend2 := logging.NewLogBackend(os.Stderr, "", 0)
+	backend2Formatter := logging.NewBackendFormatter(backend2, format)
+	backend1Leveled := logging.AddModuleLevel(backend1)
+	backend1Leveled.SetLevel(logging.ERROR, "")
+	logging.SetBackend(backend1Leveled, backend2Formatter)
+	app := cli.NewApp()
+	app.Name = "txproxy"
+	app.Usage = "a cool proxy"
+	app.Flags = []cli.Flag{
+		cli.StringFlag{
+			Name:  "port, p",
+			Value: "8080",
+			Usage: "port to listen",
+		},
 	}
-	for {
-		conn, err := l.Accept()
+	app.Action = func(c *cli.Context) error {
+		port := c.String("port")
+		l, err := net.Listen("tcp", ":"+port)
 		if err != nil {
-			log.Panic(err)
+			log.Critical(err)
 		}
+		log.Infof("txproxy listen on %s", port)
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				log.Critical(err)
+			}
 
-		go handleConn(conn)
+			go handleConn(conn)
+		}
+	}
+	err := app.Run(os.Args)
+	if err != nil {
+		log.Critical(err)
 	}
 }
 
 func parseHostPort(b []byte) (host string, port string) {
-	log.Println(string(b))
+	log.Debug(string(b))
 	p := regexp.MustCompile(`Host: (.*?):?(\d+)?\r\n`)
 	res := p.FindSubmatch(b)
 	if len(res) == 3 {
@@ -59,16 +92,22 @@ func handleConn(conn net.Conn) {
 
 	partialData := read(conn)
 	host, port := parseHostPort(partialData)
-	log.Printf("read %d bytes from client", len(partialData))
-	log.Printf("client request %s:%s", string(host), string(port))
+	log.Debugf("read %d bytes from client", len(partialData))
+	log.Debugf("client request %s:%s", string(host), string(port))
 	hostConn, err := net.Dial("tcp", host+":"+port)
 	if err != nil {
 		log.Panic()
 	}
 	if port == "443" {
-		conn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
+		_, err := conn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
+		if err != nil {
+			log.Panic(err)
+		}
 	} else {
-		hostConn.Write(partialData)
+		_, err := hostConn.Write(partialData)
+		if err != nil {
+			log.Panic(err)
+		}
 	}
 	go io.Copy(hostConn, conn)
 	io.Copy(conn, hostConn)
